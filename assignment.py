@@ -240,6 +240,7 @@ def load_ratings(gc, spreadsheet_id, sheet_name="RATING GUIDE"):
 
     ratings_gs = ratings_gs[["Guide", rating_col]].copy()
     ratings_gs = ratings_gs.rename(columns={"Guide": "Name", rating_col: "Rating"})
+    ratings_gs["Name"]   = ratings_gs["Name"].astype(str).str.strip()
     ratings_gs["Rating"] = pd.to_numeric(ratings_gs["Rating"], errors="coerce")
 
     return ratings_gs
@@ -286,9 +287,12 @@ def run_assignment():
     ratings_gs = load_ratings(gc, GS_RATING_ID, "RATING GUIDE")
 
     # ---- Buat guide_dict ----
-    # Gabung semua nama dari unavailability + rating
+    # Strip semua nama di ratings_gs supaya tidak ada spasi tersembunyi
+    ratings_gs["Name"] = ratings_gs["Name"].astype(str).str.strip()
+
+    # Gabung semua nama dari unavailability + rating (semua sudah di-strip)
     all_guide_names = set(unavail_dict.keys()) | set(
-        ratings_gs["Name"].dropna().astype(str).tolist()
+        ratings_gs["Name"].dropna().tolist()
     )
 
     guide_dict = {}
