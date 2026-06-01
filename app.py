@@ -23,20 +23,17 @@ if st.button("▶ Generate Assignment", type="primary", use_container_width=True
             st.error(f"❌ Error saat generate: {e}")
             st.exception(e)
 
-# Tampilkan hasil kalau ada data (baik baru maupun dari session sebelumnya)
 if "assignment_df" in st.session_state:
     assignment_df = st.session_state["assignment_df"]
 
-    # ---- Tabel hasil ----
     st.subheader("Hasil Penugasan")
     st.dataframe(assignment_df, use_container_width=True)
 
-    # ---- Statistik ringkas ----
     st.subheader("Statistik")
     total_jadwal = len(assignment_df)
-    tidak_ada = (assignment_df["GUIDE_DITUGASKAN"] == "TIDAK ADA GUIDE").sum()
-    berhasil = total_jadwal - tidak_ada
-    guide_unik = assignment_df[
+    tidak_ada    = (assignment_df["GUIDE_DITUGASKAN"] == "TIDAK ADA GUIDE").sum()
+    berhasil     = total_jadwal - tidak_ada
+    guide_unik   = assignment_df[
         assignment_df["GUIDE_DITUGASKAN"] != "TIDAK ADA GUIDE"
     ]["GUIDE_DITUGASKAN"].nunique()
 
@@ -45,13 +42,11 @@ if "assignment_df" in st.session_state:
     c2.metric("Berhasil Ditugaskan", berhasil)
     c3.metric("Guide Terlibat", guide_unik)
 
-    # ---- Visualisasi distribusi ----
     st.subheader("Distribusi Penugasan Guide")
     guide_stats = (
         assignment_df[
             assignment_df["GUIDE_DITUGASKAN"] != "TIDAK ADA GUIDE"
-        ]["GUIDE_DITUGASKAN"]
-        .value_counts()
+        ]["GUIDE_DITUGASKAN"].value_counts()
     )
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.bar(guide_stats.index, guide_stats.values, color="#4C72B0")
@@ -62,7 +57,6 @@ if "assignment_df" in st.session_state:
     plt.tight_layout()
     st.pyplot(fig)
 
-    # ---- Tabel total per guide ----
     st.subheader("Total Penugasan per Guide")
     summary_df = (
         assignment_df[assignment_df["GUIDE_DITUGASKAN"] != "TIDAK ADA GUIDE"]
@@ -81,7 +75,6 @@ if "assignment_df" in st.session_state:
 
     st.divider()
 
-    # ---- Export ke Sheets ----
     st.subheader("Export ke Google Sheets")
     if st.button("📤 Tulis ke Sheet 'Penugasan'", use_container_width=True):
         with st.spinner("Menulis ke Google Sheets..."):
