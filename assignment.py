@@ -36,6 +36,15 @@ def get_gspread_client():
 
 
 # =========================================================
+# HELPER: normalisasi nama guide (strip whitespace)
+# Dipanggil di semua tempat yang handle nama guide
+# =========================================================
+
+def normalize_name(name):
+    return str(name).strip()
+
+
+# =========================================================
 # HELPER: ekstrak tanggal dari teks dashboard
 # Format: "3 Rabu Juni 2026, KOTABARU (15:30)"
 # =========================================================
@@ -120,29 +129,16 @@ SHIFT_MAP = {
 # =========================================================
 # BACA UNAVAILABILITY via Sheets API (bukan CSV)
 #
-# Kenapa pakai API bukan CSV:
-#   Google Sheets mengekspor dropdown sebagai teks tampilan
-#   yang kadang tidak konsisten. API membaca nilai sel asli.
-#
-# Struktur sheet:
-#   - Ada beberapa blok tabel (1 blok per minggu)
-#   - Tiap blok: baris header → kolom B="Guide", kolom C dst=angka tanggal
-#   - Baris data: kolom B=nama guide, kolom C dst=nilai P/S/M/TS/PM/SM/PS
-#
 # Return: { "NamaGuide": { (tanggal_int, "SHIFT"), ... } }
 # =========================================================
 
 def parse_unavailability_sheet(gc, spreadsheet_id, sheet_name):
     spreadsheet = gc.open_by_key(spreadsheet_id)
     worksheet   = spreadsheet.worksheet(sheet_name)
+    all_values  = worksheet.get_all_values()
 
-    # Ambil semua nilai sel (bukan formula, bukan format)
-    all_values = worksheet.get_all_values()
-    # all_values adalah list of list, index [baris][kolom], mulai dari 0
+    unavail = {}
 
-    unavail = {}  # { "NamaGuide": set of (tanggal_int, "SHIFT") }
-
-    # Cari semua baris yang kolom B (index 1) == "Guide" → baris header blok
     header_row_indices = [
         i for i, row in enumerate(all_values)
         if len(row) > 1 and row[1].strip().lower() == "guide"
@@ -151,43 +147,78 @@ def parse_unavailability_sheet(gc, spreadsheet_id, sheet_name):
     for h_idx in header_row_indices:
         header_row = all_values[h_idx]
 
-        # Mapping: kolom index → angka tanggal
-        # Kolom C ke kanan (index 2+) berisi angka tanggal
         col_to_day = {}
         for col_idx in range(2, len(header_row)):
             val = header_row[col_idx].strip()
-            if re.match(r"^\d{1,2}$", val):  # hanya angka 1-31
+            if re.match(r"^\d{1,2}$", val):
                 col_to_day[col_idx] = int(val)
 
-        # Baca baris data guide di bawah header
         for row_idx in range(h_idx + 1, len(all_values)):
             row = all_values[row_idx]
 
-            # Ambil nama guide dari kolom B (index 1)
             if len(row) < 2:
                 break
-            guide_name = row[1].strip()
+            # FIX 1: normalisasi nama saat baca unavailability
+            guide_name = normalize_name(row[1])
 
-            # Berhenti kalau baris kosong atau ketemu header blok berikutnya
             if not guide_name or guide_name.lower() == "guide":
                 break
 
             if guide_name not in unavail:
                 unavail[guide_name] = set()
 
-            # Cek tiap kolom tanggal
             for col_idx, day_num in col_to_day.items():
                 if col_idx >= len(row):
                     continue
-
                 cell_val = row[col_idx].strip().upper()
-
-                # Cocokkan dengan SHIFT_MAP
                 if cell_val in SHIFT_MAP:
                     for shift in SHIFT_MAP[cell_val]:
                         unavail[guide_name].add((day_num, shift))
 
     return unavail
+
+
+# =========================================================
+# HELPER: Load Rating dari sheet RATING GUIDE
+# =========================================================
+
+def load_ratings(gc, spreadsheet_id, sheet_name="RATING GUIDE"):
+    spreadsheet = gc.open_by_key(spreadsheet_id)
+    worksheet   = spreadsheet.worksheet(sheet_name)
+    all_values  = worksheet.get_all_values()
+
+    header_idx = None
+    for i, row in enumerate(all_values):
+        row_upper = [str(c).strip().upper() for c in row]
+        if "GUIDE" in row_upper and any("RATING" in c for c in row_upper):
+            header_idx = i
+            break
+
+    if header_idx is None:
+        raise ValueError(
+            "Baris header 'Guide' + 'RATING' tidak ditemukan di sheet RATING GUIDE"
+        )
+
+    headers   = [str(c).strip() for c in all_values[header_idx]]
+    data_rows = all_values[header_idx + 1:]
+
+    ratings_gs = pd.DataFrame(data_rows, columns=headers)
+    ratings_gs = ratings_gs[ratings_gs["Guide"].str.strip() != ""].copy()
+    ratings_gs = ratings_gs[ratings_gs["Guide"].notna()].copy()
+
+    # FIX 1: normalisasi nama di sheet rating
+    ratings_gs["Guide"] = ratings_gs["Guide"].apply(normalize_name)
+
+    rating_col = [c for c in ratings_gs.columns if "RATING" in c.upper()]
+    if not rating_col:
+        raise ValueError("Kolom RATING tidak ditemukan di sheet RATING GUIDE")
+    rating_col = rating_col[0]
+
+    ratings_gs = ratings_gs[["Guide", rating_col]].copy()
+    ratings_gs = ratings_gs.rename(columns={"Guide": "Name", rating_col: "Rating"})
+    ratings_gs["Rating"] = pd.to_numeric(ratings_gs["Rating"], errors="coerce")
+
+    return ratings_gs
 
 
 # =========================================================
@@ -199,10 +230,9 @@ def run_assignment():
     GS_UNAVAILABILITY_ID = "1jS8KUIYfCHAHafgibzr74GwCEBQvaObHSgoCqRiyGCA"
     GS_RATING_ID         = "1jS8KUIYfCHAHafgibzr74GwCEBQvaObHSgoCqRiyGCA"
 
-    # Satu client untuk semua operasi Sheets API
     gc = get_gspread_client()
 
-    # ---- Load Dashboard via CSV (public read, tidak butuh auth) ----
+    # ---- Load Dashboard via CSV ----
     csv_url = (
         f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}"
         f"/gviz/tq?tqx=out:csv&sheet=DASHBOARD"
@@ -216,44 +246,36 @@ def run_assignment():
     dashboard["DAY_NUM"] = dashboard["TANGGAL & RUTE"].apply(extract_day_number)
     dashboard["SHIFT"]   = dashboard["TANGGAL & RUTE"].apply(extract_shift)
     dashboard = dashboard[dashboard["DATE"].notna()].copy()
+
+    # FIX 2: buang baris yang DAY_NUM atau SHIFT tidak terbaca
+    # Kalau DAY_NUM None → (None, shift) tidak akan pernah cocok dengan unavailability
+    # sehingga guide tetap di-assign walau harusnya tidak bisa
+    dashboard = dashboard[dashboard["DAY_NUM"].notna()].copy()
+    dashboard = dashboard[dashboard["SHIFT"] != "UNKNOWN"].copy()
+
     dashboard["WEEK"] = dashboard["DATE"].dt.isocalendar().week
     dashboard = dashboard.sort_values("DATE", ascending=True).reset_index(drop=True)
 
     # ---- Load Unavailability via Sheets API ----
-    # Pakai API supaya nilai dropdown terbaca dengan benar (P, S, M, TS, dll)
     unavail_dict = parse_unavailability_sheet(
         gc, GS_UNAVAILABILITY_ID, "CHECK UNAVAILABILITY MONTHLY"
     )
 
-    # ---- Load Rating via CSV ----
-    encoded_rating = quote("RATING GUIDE")
-    csv_url_rating = (
-        f"https://docs.google.com/spreadsheets/d/{GS_RATING_ID}"
-        f"/gviz/tq?tqx=out:csv&sheet={encoded_rating}"
-    )
-    ratings_gs = pd.read_csv(csv_url_rating, header=0, dtype=str)
-
-    # Cari kolom rating (judulnya bisa berubah tiap bulan, misal "MEI RATING GUIDE (1-10)")
-    rating_col = [c for c in ratings_gs.columns if "RATING" in c.upper()]
-    if not rating_col:
-        raise ValueError("Kolom RATING tidak ditemukan di sheet RATING GUIDE")
-    rating_col = rating_col[0]
-
-    ratings_gs = ratings_gs[["Guide", rating_col]].copy()
-    ratings_gs = ratings_gs.rename(columns={"Guide": "Name", rating_col: "Rating"})
-    ratings_gs["Rating"] = pd.to_numeric(ratings_gs["Rating"], errors="coerce")
+    # ---- Load Rating via Sheets API ----
+    ratings_gs = load_ratings(gc, GS_RATING_ID, "RATING GUIDE")
 
     # ---- Buat guide_dict ----
-    # Gabung semua nama dari unavailability + rating
     all_guide_names = set(unavail_dict.keys()) | set(
-        ratings_gs["Name"].dropna().astype(str).tolist()
+        ratings_gs["Name"].dropna().apply(normalize_name).tolist()
     )
 
     guide_dict = {}
     for name in all_guide_names:
-        name = str(name).strip()
+        name = normalize_name(name)
         if not name or name == "nan":
             continue
+
+        # FIX 1: normalisasi nama saat lookup rating
         rating_row = ratings_gs[ratings_gs["Name"] == name]
         if len(rating_row) > 0 and not pd.isna(rating_row["Rating"].values[0]):
             rating = float(rating_row["Rating"].values[0])
@@ -262,7 +284,7 @@ def run_assignment():
 
         guide_dict[name] = {
             "rating":         rating,
-            "unavailable":    unavail_dict.get(name, set()),  # set of (day_int, "SHIFT")
+            "unavailable":    unavail_dict.get(name, set()),
             "assigned_count": 0,
         }
 
@@ -276,7 +298,6 @@ def run_assignment():
             "DATE", ascending=True
         ).reset_index(drop=True)
 
-        # Reset hitungan tiap awal minggu
         for guide in guide_dict:
             guide_dict[guide]["assigned_count"] = 0
 
@@ -284,12 +305,12 @@ def run_assignment():
 
         for _, row in dashboard_week.iterrows():
             jadwal  = row["TANGGAL & RUTE"]
-            day_num = row["DAY_NUM"]   # angka tanggal, misal 3
-            shift   = row["SHIFT"]     # "PAGI" / "SORE" / "MALAM"
+            # FIX 2: cast ke int agar (3, "SORE") bukan (3.0, "SORE")
+            day_num = int(row["DAY_NUM"])
+            shift   = row["SHIFT"]
 
             feasible = []
             for guide, info in guide_dict.items():
-                # Cek ketidaktersediaan: (3, "SORE") ada di set unavailable Age?
                 is_unavailable = (day_num, shift) in info["unavailable"]
                 if not is_unavailable:
                     k      = info["assigned_count"]
