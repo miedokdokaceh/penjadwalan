@@ -27,8 +27,7 @@ def get_gspread_client():
         if not os.path.exists("service_account.json"):
             raise FileNotFoundError(
                 "Credentials tidak ditemukan. "
-                "Tambahkan [gcp_service_account] di Streamlit Secrets, "
-                "atau letakkan service_account.json di folder project."
+                "Tambahkan [gcp_service_account] di Streamlit Secrets."
             )
         creds = Credentials.from_service_account_file(
             "service_account.json", scopes=scope,
@@ -38,11 +37,10 @@ def get_gspread_client():
 
 # =========================================================
 # HELPER: ekstrak tanggal dari teks dashboard
-# Format: "1 Jumat Mei 2026, PAKUALAMAN (09:00)"
+# Format: "3 Rabu Juni 2026, KOTABARU (15:30)"
 # =========================================================
 
 def extract_date(text):
-    # Cari pola: angka hari + nama hari + nama bulan + tahun
     match = re.search(r"(\d{1,2})\s+\w+\s+(\w+)\s+(\d{4})", str(text))
     if match:
         day_num    = match.group(1)
@@ -64,7 +62,7 @@ def extract_date(text):
 
 # =========================================================
 # HELPER: ekstrak angka tanggal dari teks dashboard
-# "1 Jumat Mei 2026, ..." → 1
+# "3 Rabu Juni 2026, ..." → 3
 # =========================================================
 
 def extract_day_number(text):
@@ -76,8 +74,10 @@ def extract_day_number(text):
 
 # =========================================================
 # HELPER: tentukan shift dari jam di teks dashboard
-# Format jam: (HH:MM)
-# PAGI 06:00-11:59 | SORE 12:00-17:59 | MALAM 18:00-23:59
+# "KOTABARU (15:30)" → SORE
+# PAGI  = 06:00–11:59
+# SORE  = 12:00–17:59
+# MALAM = 18:00–23:59
 # =========================================================
 
 def extract_shift(text):
@@ -94,7 +94,16 @@ def extract_shift(text):
 
 
 # =========================================================
-# MAPPING nilai dropdown → shift yang tidak tersedia
+# MAPPING dropdown → shift yang TIDAK TERSEDIA
+#
+# Nilai dropdown di sheet:
+#   P  = tidak bisa PAGI
+#   S  = tidak bisa SORE
+#   M  = tidak bisa MALAM
+#   TS = tidak bisa semua (PAGI, SORE, MALAM)
+#   PM = tidak bisa PAGI & MALAM
+#   SM = tidak bisa SORE & MALAM
+#   PS = tidak bisa PAGI & SORE
 # =========================================================
 
 SHIFT_MAP = {
@@ -109,55 +118,71 @@ SHIFT_MAP = {
 
 
 # =========================================================
-# HELPER: baca sheet unavailability
+# BACA UNAVAILABILITY via Sheets API (bukan CSV)
+#
+# Kenapa pakai API bukan CSV:
+#   Google Sheets mengekspor dropdown sebagai teks tampilan
+#   yang kadang tidak konsisten. API membaca nilai sel asli.
 #
 # Struktur sheet:
-#   - Ada beberapa blok tabel (per minggu)
-#   - Baris header tiap blok: kolom B = "Guide", kolom C dst = angka tanggal
-#   - Baris data: kolom B = nama guide, kolom C dst = nilai P/S/M/TS/PM/SM/PS
+#   - Ada beberapa blok tabel (1 blok per minggu)
+#   - Tiap blok: baris header → kolom B="Guide", kolom C dst=angka tanggal
+#   - Baris data: kolom B=nama guide, kolom C dst=nilai P/S/M/TS/PM/SM/PS
 #
 # Return: { "NamaGuide": { (tanggal_int, "SHIFT"), ... } }
 # =========================================================
 
-def parse_unavailability_sheet(spreadsheet_id, sheet_name):
-    encoded = quote(sheet_name)
-    csv_url = (
-        f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
-        f"/gviz/tq?tqx=out:csv&sheet={encoded}"
-    )
-    raw = pd.read_csv(csv_url, header=None, dtype=str)
+def parse_unavailability_sheet(gc, spreadsheet_id, sheet_name):
+    spreadsheet = gc.open_by_key(spreadsheet_id)
+    worksheet   = spreadsheet.worksheet(sheet_name)
 
-    unavail = {}  # { guide_name: set of (day_int, shift_str) }
+    # Ambil semua nilai sel (bukan formula, bukan format)
+    all_values = worksheet.get_all_values()
+    # all_values adalah list of list, index [baris][kolom], mulai dari 0
 
-    # Temukan semua baris yang kolom B (index 1) == "Guide" → header tabel
-    header_rows = raw.index[
-        raw.iloc[:, 1].astype(str).str.strip().str.lower() == "guide"
-    ].tolist()
+    unavail = {}  # { "NamaGuide": set of (tanggal_int, "SHIFT") }
 
-    for h_idx in header_rows:
-        header_row = raw.iloc[h_idx]
+    # Cari semua baris yang kolom B (index 1) == "Guide" → baris header blok
+    header_row_indices = [
+        i for i, row in enumerate(all_values)
+        if len(row) > 1 and row[1].strip().lower() == "guide"
+    ]
+
+    for h_idx in header_row_indices:
+        header_row = all_values[h_idx]
 
         # Mapping: kolom index → angka tanggal
+        # Kolom C ke kanan (index 2+) berisi angka tanggal
         col_to_day = {}
         for col_idx in range(2, len(header_row)):
-            val = str(header_row[col_idx]).strip()
-            # Ambil hanya yang berupa angka (tanggal 1-31)
-            if re.match(r"^\d{1,2}$", val):
+            val = header_row[col_idx].strip()
+            if re.match(r"^\d{1,2}$", val):  # hanya angka 1-31
                 col_to_day[col_idx] = int(val)
 
-        # Baca baris data guide sampai baris kosong / header berikutnya
-        for row_idx in range(h_idx + 1, len(raw)):
-            guide_name = str(raw.iloc[row_idx, 1]).strip()
+        # Baca baris data guide di bawah header
+        for row_idx in range(h_idx + 1, len(all_values)):
+            row = all_values[row_idx]
 
-            # Berhenti kalau baris kosong atau ketemu header lagi
-            if guide_name in ("", "nan") or guide_name.lower() == "guide":
+            # Ambil nama guide dari kolom B (index 1)
+            if len(row) < 2:
+                break
+            guide_name = row[1].strip()
+
+            # Berhenti kalau baris kosong atau ketemu header blok berikutnya
+            if not guide_name or guide_name.lower() == "guide":
                 break
 
             if guide_name not in unavail:
                 unavail[guide_name] = set()
 
+            # Cek tiap kolom tanggal
             for col_idx, day_num in col_to_day.items():
-                cell_val = str(raw.iloc[row_idx, col_idx]).strip().upper()
+                if col_idx >= len(row):
+                    continue
+
+                cell_val = row[col_idx].strip().upper()
+
+                # Cocokkan dengan SHIFT_MAP
                 if cell_val in SHIFT_MAP:
                     for shift in SHIFT_MAP[cell_val]:
                         unavail[guide_name].add((day_num, shift))
@@ -174,7 +199,10 @@ def run_assignment():
     GS_UNAVAILABILITY_ID = "1jS8KUIYfCHAHafgibzr74GwCEBQvaObHSgoCqRiyGCA"
     GS_RATING_ID         = "1jS8KUIYfCHAHafgibzr74GwCEBQvaObHSgoCqRiyGCA"
 
-    # ---- Load Dashboard ----
+    # Satu client untuk semua operasi Sheets API
+    gc = get_gspread_client()
+
+    # ---- Load Dashboard via CSV (public read, tidak butuh auth) ----
     csv_url = (
         f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}"
         f"/gviz/tq?tqx=out:csv&sheet=DASHBOARD"
@@ -189,14 +217,15 @@ def run_assignment():
     dashboard["SHIFT"]   = dashboard["TANGGAL & RUTE"].apply(extract_shift)
     dashboard = dashboard[dashboard["DATE"].notna()].copy()
     dashboard["WEEK"] = dashboard["DATE"].dt.isocalendar().week
-    dashboard = dashboard.sort_values(by="DATE", ascending=True).reset_index(drop=True)
+    dashboard = dashboard.sort_values("DATE", ascending=True).reset_index(drop=True)
 
-    # ---- Load Unavailability ----
+    # ---- Load Unavailability via Sheets API ----
+    # Pakai API supaya nilai dropdown terbaca dengan benar (P, S, M, TS, dll)
     unavail_dict = parse_unavailability_sheet(
-        GS_UNAVAILABILITY_ID, "CHECK UNAVAILABILITY MONTHLY"
+        gc, GS_UNAVAILABILITY_ID, "CHECK UNAVAILABILITY MONTHLY"
     )
 
-    # ---- Load Rating ----
+    # ---- Load Rating via CSV ----
     encoded_rating = quote("RATING GUIDE")
     csv_url_rating = (
         f"https://docs.google.com/spreadsheets/d/{GS_RATING_ID}"
@@ -204,7 +233,7 @@ def run_assignment():
     )
     ratings_gs = pd.read_csv(csv_url_rating, header=0, dtype=str)
 
-    # Cari kolom rating (judulnya bisa berubah tiap bulan)
+    # Cari kolom rating (judulnya bisa berubah tiap bulan, misal "MEI RATING GUIDE (1-10)")
     rating_col = [c for c in ratings_gs.columns if "RATING" in c.upper()]
     if not rating_col:
         raise ValueError("Kolom RATING tidak ditemukan di sheet RATING GUIDE")
@@ -214,7 +243,8 @@ def run_assignment():
     ratings_gs = ratings_gs.rename(columns={"Guide": "Name", rating_col: "Rating"})
     ratings_gs["Rating"] = pd.to_numeric(ratings_gs["Rating"], errors="coerce")
 
-    # Gabung semua nama guide dari kedua sumber
+    # ---- Buat guide_dict ----
+    # Gabung semua nama dari unavailability + rating
     all_guide_names = set(unavail_dict.keys()) | set(
         ratings_gs["Name"].dropna().astype(str).tolist()
     )
@@ -225,14 +255,14 @@ def run_assignment():
         if not name or name == "nan":
             continue
         rating_row = ratings_gs[ratings_gs["Name"] == name]
-        rating = (
-            float(rating_row["Rating"].values[0])
-            if len(rating_row) > 0 and not pd.isna(rating_row["Rating"].values[0])
-            else 3.0
-        )
+        if len(rating_row) > 0 and not pd.isna(rating_row["Rating"].values[0]):
+            rating = float(rating_row["Rating"].values[0])
+        else:
+            rating = 3.0
+
         guide_dict[name] = {
-            "rating": rating,
-            "unavailable": unavail_dict.get(name, set()),  # set of (day_int, shift)
+            "rating":         rating,
+            "unavailable":    unavail_dict.get(name, set()),  # set of (day_int, "SHIFT")
             "assigned_count": 0,
         }
 
@@ -243,10 +273,10 @@ def run_assignment():
     for current_week in weeks:
         dashboard_week = dashboard[dashboard["WEEK"] == current_week].copy()
         dashboard_week = dashboard_week.sort_values(
-            by="DATE", ascending=True
+            "DATE", ascending=True
         ).reset_index(drop=True)
 
-        # Reset hitungan tiap minggu
+        # Reset hitungan tiap awal minggu
         for guide in guide_dict:
             guide_dict[guide]["assigned_count"] = 0
 
@@ -254,12 +284,12 @@ def run_assignment():
 
         for _, row in dashboard_week.iterrows():
             jadwal  = row["TANGGAL & RUTE"]
-            day_num = row["DAY_NUM"]
-            shift   = row["SHIFT"]
+            day_num = row["DAY_NUM"]   # angka tanggal, misal 3
+            shift   = row["SHIFT"]     # "PAGI" / "SORE" / "MALAM"
 
             feasible = []
             for guide, info in guide_dict.items():
-                # Cek apakah guide tidak tersedia di (tanggal, shift) ini
+                # Cek ketidaktersediaan: (3, "SORE") ada di set unavailable Age?
                 is_unavailable = (day_num, shift) in info["unavailable"]
                 if not is_unavailable:
                     k      = info["assigned_count"]
@@ -310,7 +340,7 @@ def run_assignment():
         how="left",
     )
     assignment_df = assignment_df.sort_values(
-        by="DATE", ascending=True
+        "DATE", ascending=True
     ).reset_index(drop=True)
     assignment_df = assignment_df.drop(columns=["TANGGAL & RUTE"])
 
@@ -324,7 +354,7 @@ def run_assignment():
 def export_to_sheets(assignment_df):
     gc = get_gspread_client()
     SPREADSHEET_ID_EXPORT = "1oYpIm7qRNS69oWxgWPVPx1eOywvOsanr2VLaH7_pnSY"
-    sheet_name_export = "Penugasan"
+    sheet_name_export     = "Penugasan"
 
     spreadsheet = gc.open_by_key(SPREADSHEET_ID_EXPORT)
     try:
