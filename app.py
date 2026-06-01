@@ -13,35 +13,19 @@ st.caption("Sistem penugasan guide otomatis dari Google Sheets")
 
 st.divider()
 
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.subheader("Generate Penugasan")
-    st.write(
-        "Klik tombol di bawah untuk memproses data dari Google Sheets "
-        "dan menghasilkan penugasan guide secara otomatis."
-    )
-
-with col2:
-    st.subheader("Status")
-    status_box = st.empty()
-    status_box.info("Belum ada proses yang dijalankan.")
-
-st.divider()
-
 if st.button("▶ Generate Assignment", type="primary", use_container_width=True):
-
     with st.spinner("Memuat data dari Google Sheets..."):
         try:
             assignment_df = run_assignment()
             st.session_state["assignment_df"] = assignment_df
-            status_box.success("✅ Assignment berhasil dibuat!")
+            st.success(f"✅ Berhasil memproses **{len(assignment_df)}** jadwal.")
         except Exception as e:
-            status_box.error(f"❌ Error: {e}")
+            st.error(f"❌ Error saat generate: {e}")
             st.exception(e)
-            st.stop()
 
-    st.success(f"✅ Berhasil memproses **{len(assignment_df)}** jadwal.")
+# Tampilkan hasil kalau ada data (baik baru maupun dari session sebelumnya)
+if "assignment_df" in st.session_state:
+    assignment_df = st.session_state["assignment_df"]
 
     # ---- Tabel hasil ----
     st.subheader("Hasil Penugasan")
@@ -92,7 +76,7 @@ if st.button("▶ Generate Assignment", type="primary", use_container_width=True
         .sort_values("Total_Penugasan", ascending=False)
         .reset_index(drop=True)
     )
-    summary_df.index += 1  # mulai dari 1
+    summary_df.index += 1
     st.dataframe(summary_df, use_container_width=True)
 
     st.divider()
@@ -107,8 +91,3 @@ if st.button("▶ Generate Assignment", type="primary", use_container_width=True
             except Exception as e:
                 st.error(f"❌ Gagal export: {e}")
                 st.exception(e)
-
-# Kalau sudah ada hasil di session, tampilkan ulang tanpa generate ulang
-elif "assignment_df" in st.session_state:
-    st.info("Data assignment terakhir masih tersimpan. Generate ulang untuk refresh.")
-    st.dataframe(st.session_state["assignment_df"], use_container_width=True)
