@@ -129,8 +129,34 @@ SHIFT_MAP = {
 # =========================================================
 # BACA UNAVAILABILITY via Sheets API (bukan CSV)
 #
-# Return: { "NamaGuide": { (tanggal_int, "SHIFT"), ... } }
+# Return: { "NamaGuide": { (bulan_int, tanggal_int, "SHIFT"), ... } }
 # =========================================================
+
+# Mapping nama bulan Indonesia/Inggris → angka bulan
+_MONTH_NAME_MAP = {
+    "JANUARI": 1, "FEBRUARI": 2, "MARET": 3, "APRIL": 4,
+    "MEI": 5, "JUNI": 6, "JULI": 7, "AGUSTUS": 8,
+    "SEPTEMBER": 9, "OKTOBER": 10, "NOVEMBER": 11, "DESEMBER": 12,
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4,
+    "MAY": 5, "JUN": 6, "JUL": 7, "AUG": 8,
+    "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+def _detect_block_month(all_values, h_idx):
+    """Cari angka bulan dari baris BULAN: di atas header blok."""
+    for look_back in range(h_idx - 1, max(h_idx - 15, -1), -1):
+        row_text = " ".join(str(c).strip().upper() for c in all_values[look_back])
+        if "BULAN" in row_text:
+            for cell in all_values[look_back]:
+                candidate = str(cell).strip().upper()
+                if candidate in _MONTH_NAME_MAP:
+                    return _MONTH_NAME_MAP[candidate]
+                # partial match (e.g. "JUNE", "MARCH")
+                for key, val in _MONTH_NAME_MAP.items():
+                    if len(key) >= 3 and candidate.startswith(key[:3]):
+                        return val
+            break
+    return None  # bulan tidak diketahui
 
 def parse_unavailability_sheet(gc, spreadsheet_id, sheet_name):
     spreadsheet = gc.open_by_key(spreadsheet_id)
@@ -144,8 +170,15 @@ def parse_unavailability_sheet(gc, spreadsheet_id, sheet_name):
         if len(row) > 1 and row[1].strip().lower() == "guide"
     ]
 
+    # Kumpulkan semua indeks header blok untuk tahu batas tiap blok
+    next_header = {header_row_indices[i]: header_row_indices[i + 1]
+                   for i in range(len(header_row_indices) - 1)}
+
     for h_idx in header_row_indices:
         header_row = all_values[h_idx]
+
+        # FIX: deteksi bulan dari baris "BULAN:" di atas header blok
+        block_month = _detect_block_month(all_values, h_idx)
 
         col_to_day = {}
         for col_idx in range(2, len(header_row)):
@@ -153,15 +186,24 @@ def parse_unavailability_sheet(gc, spreadsheet_id, sheet_name):
             if re.match(r"^\d{1,2}$", val):
                 col_to_day[col_idx] = int(val)
 
-        for row_idx in range(h_idx + 1, len(all_values)):
+        # Batas bawah blok ini = header blok berikutnya (atau akhir sheet)
+        block_end = next_header.get(h_idx, len(all_values))
+
+        for row_idx in range(h_idx + 1, block_end):
             row = all_values[row_idx]
 
+            # Baris terlalu pendek → skip (bukan break)
             if len(row) < 2:
-                break
-            # FIX 1: normalisasi nama saat baca unavailability
+                continue
+
             guide_name = normalize_name(row[1])
 
-            if not guide_name or guide_name.lower() == "guide":
+            # Baris kosong di kolom B → skip, masih dalam blok yang sama
+            if not guide_name:
+                continue
+
+            # Ketemu header blok berikutnya → stop
+            if guide_name.lower() == "guide":
                 break
 
             if guide_name not in unavail:
@@ -173,7 +215,8 @@ def parse_unavailability_sheet(gc, spreadsheet_id, sheet_name):
                 cell_val = row[col_idx].strip().upper()
                 if cell_val in SHIFT_MAP:
                     for shift in SHIFT_MAP[cell_val]:
-                        unavail[guide_name].add((day_num, shift))
+                        # FIX: simpan (month, day, shift) — bukan (day, shift)
+                        unavail[guide_name].add((block_month, day_num, shift))
 
     return unavail
 
@@ -304,14 +347,15 @@ def run_assignment():
         assignment_output = []
 
         for _, row in dashboard_week.iterrows():
-            jadwal  = row["TANGGAL & RUTE"]
-            # FIX 2: cast ke int agar (3, "SORE") bukan (3.0, "SORE")
-            day_num = int(row["DAY_NUM"])
-            shift   = row["SHIFT"]
+            jadwal    = row["TANGGAL & RUTE"]
+            day_num   = int(row["DAY_NUM"])
+            shift     = row["SHIFT"]
+            month_num = row["DATE"].month  # FIX: sertakan bulan
 
             feasible = []
             for guide, info in guide_dict.items():
-                is_unavailable = (day_num, shift) in info["unavailable"]
+                # FIX: pakai (month, day, shift) agar tidak lintas bulan
+                is_unavailable = (month_num, day_num, shift) in info["unavailable"]
                 if not is_unavailable:
                     k      = info["assigned_count"]
                     rating = info["rating"]
