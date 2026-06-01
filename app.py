@@ -78,6 +78,23 @@ if st.button("▶ Generate Assignment", type="primary", use_container_width=True
     plt.tight_layout()
     st.pyplot(fig)
 
+    # ---- Tabel total per guide ----
+    st.subheader("Total Penugasan per Guide")
+    summary_df = (
+        assignment_df[assignment_df["GUIDE_DITUGASKAN"] != "TIDAK ADA GUIDE"]
+        .groupby("GUIDE_DITUGASKAN")
+        .agg(
+            Total_Penugasan=("GUIDE_DITUGASKAN", "count"),
+            Rating=("RATING", "first"),
+        )
+        .reset_index()
+        .rename(columns={"GUIDE_DITUGASKAN": "Guide"})
+        .sort_values("Total_Penugasan", ascending=False)
+        .reset_index(drop=True)
+    )
+    summary_df.index += 1  # mulai dari 1
+    st.dataframe(summary_df, use_container_width=True)
+
     st.divider()
 
     # ---- Export ke Sheets ----
