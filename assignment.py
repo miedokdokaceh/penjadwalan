@@ -18,14 +18,19 @@ def get_gspread_client():
         "https://www.googleapis.com/auth/drive",
     ]
 
-    # Di local: pakai file service_account.json
-    # Di Streamlit Cloud: pakai st.secrets
-    try:
+    if "gcp_service_account" in st.secrets:
         creds = Credentials.from_service_account_info(
             st.secrets["gcp_service_account"],
             scopes=scope,
         )
-    except Exception:
+    else:
+        import os
+        if not os.path.exists("service_account.json"):
+            raise FileNotFoundError(
+                "Credentials tidak ditemukan. "
+                "Tambahkan [gcp_service_account] di Streamlit Secrets, "
+                "atau letakkan service_account.json di folder project."
+            )
         creds = Credentials.from_service_account_file(
             "service_account.json",
             scopes=scope,
