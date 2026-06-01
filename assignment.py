@@ -191,62 +191,6 @@ def parse_unavailability_sheet(gc, spreadsheet_id, sheet_name):
 
 
 # =========================================================
-# HELPER: Load Rating dari sheet RATING GUIDE
-#
-# Sheet punya baris metadata di atas tabel asli:
-#   Baris 3: judul "RATING GUIDE"
-#   Baris 5: dropdown BULAN
-#   Baris 7: header → No. | Guide | RATING GUIDE (1-10)
-#   Baris 8+: data guide
-#
-# Solusi: cari baris yang mengandung "Guide" secara dinamis
-# sebagai header, bukan hardcode header=0.
-# =========================================================
-
-def load_ratings(gc, spreadsheet_id, sheet_name="RATING GUIDE"):
-    # Baca via Sheets API untuk menghindari masalah baris metadata
-    spreadsheet = gc.open_by_key(spreadsheet_id)
-    worksheet   = spreadsheet.worksheet(sheet_name)
-    all_values  = worksheet.get_all_values()
-
-    # Cari baris header: kolom yang mengandung "Guide" dan "RATING"
-    header_idx = None
-    for i, row in enumerate(all_values):
-        row_upper = [str(c).strip().upper() for c in row]
-        if "GUIDE" in row_upper and any("RATING" in c for c in row_upper):
-            header_idx = i
-            break
-
-    if header_idx is None:
-        raise ValueError(
-            "Baris header 'Guide' + 'RATING' tidak ditemukan di sheet RATING GUIDE"
-        )
-
-    # Buat DataFrame dari baris header ke bawah
-    headers = [str(c).strip() for c in all_values[header_idx]]
-    data_rows = all_values[header_idx + 1:]
-
-    ratings_gs = pd.DataFrame(data_rows, columns=headers)
-
-    # Buang baris kosong
-    ratings_gs = ratings_gs[ratings_gs["Guide"].str.strip() != ""].copy()
-    ratings_gs = ratings_gs[ratings_gs["Guide"].notna()].copy()
-
-    # Cari kolom rating (judulnya bisa berubah tiap bulan)
-    rating_col = [c for c in ratings_gs.columns if "RATING" in c.upper()]
-    if not rating_col:
-        raise ValueError("Kolom RATING tidak ditemukan di sheet RATING GUIDE")
-    rating_col = rating_col[0]
-
-    ratings_gs = ratings_gs[["Guide", rating_col]].copy()
-    ratings_gs = ratings_gs.rename(columns={"Guide": "Name", rating_col: "Rating"})
-    ratings_gs["Name"]   = ratings_gs["Name"].astype(str).str.strip()
-    ratings_gs["Rating"] = pd.to_numeric(ratings_gs["Rating"], errors="coerce")
-
-    return ratings_gs
-
-
-# =========================================================
 # MAIN: jalankan assignment
 # =========================================================
 
@@ -281,18 +225,28 @@ def run_assignment():
         gc, GS_UNAVAILABILITY_ID, "CHECK UNAVAILABILITY MONTHLY"
     )
 
-    # ---- Load Rating via Sheets API (fix: deteksi header dinamis) ----
-    # Tidak lagi pakai CSV karena baris metadata di atas tabel menyebabkan
-    # header=0 membaca baris yang salah → rating tidak terbaca dengan benar.
-    ratings_gs = load_ratings(gc, GS_RATING_ID, "RATING GUIDE")
+    # ---- Load Rating via CSV ----
+    encoded_rating = quote("RATING GUIDE")
+    csv_url_rating = (
+        f"https://docs.google.com/spreadsheets/d/{GS_RATING_ID}"
+        f"/gviz/tq?tqx=out:csv&sheet={encoded_rating}"
+    )
+    ratings_gs = pd.read_csv(csv_url_rating, header=0, dtype=str)
+
+    # Cari kolom rating (judulnya bisa berubah tiap bulan, misal "MEI RATING GUIDE (1-10)")
+    rating_col = [c for c in ratings_gs.columns if "RATING" in c.upper()]
+    if not rating_col:
+        raise ValueError("Kolom RATING tidak ditemukan di sheet RATING GUIDE")
+    rating_col = rating_col[0]
+
+    ratings_gs = ratings_gs[["Guide", rating_col]].copy()
+    ratings_gs = ratings_gs.rename(columns={"Guide": "Name", rating_col: "Rating"})
+    ratings_gs["Rating"] = pd.to_numeric(ratings_gs["Rating"], errors="coerce")
 
     # ---- Buat guide_dict ----
-    # Strip semua nama di ratings_gs supaya tidak ada spasi tersembunyi
-    ratings_gs["Name"] = ratings_gs["Name"].astype(str).str.strip()
-
-    # Gabung semua nama dari unavailability + rating (semua sudah di-strip)
+    # Gabung semua nama dari unavailability + rating
     all_guide_names = set(unavail_dict.keys()) | set(
-        ratings_gs["Name"].dropna().tolist()
+        ratings_gs["Name"].dropna().astype(str).tolist()
     )
 
     guide_dict = {}
@@ -335,7 +289,7 @@ def run_assignment():
 
             feasible = []
             for guide, info in guide_dict.items():
-                # Cek ketidaktersediaan: (3, "SORE") ada di set unavailable guide?
+                # Cek ketidaktersediaan: (3, "SORE") ada di set unavailable Age?
                 is_unavailable = (day_num, shift) in info["unavailable"]
                 if not is_unavailable:
                     k      = info["assigned_count"]
