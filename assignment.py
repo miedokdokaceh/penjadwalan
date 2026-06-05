@@ -129,46 +129,44 @@ SHIFT_MAP = {
 # =========================================================
 # BACA UNAVAILABILITY via Sheets API (bukan CSV)
 #
-# Return: { "NamaGuide": { (bulan_int, tanggal_int, "SHIFT"), ... } }
+# Return: { "NamaGuide": { (tanggal_int, "SHIFT"), ... } }
 # =========================================================
-
-# Mapping nama bulan Indonesia/Inggris → angka bulan
-_MONTH_NAME_MAP = {
-    "JANUARI": 1, "FEBRUARI": 2, "MARET": 3, "APRIL": 4,
-    "MEI": 5, "JUNI": 6, "JULI": 7, "AGUSTUS": 8,
-    "SEPTEMBER": 9, "OKTOBER": 10, "NOVEMBER": 11, "DESEMBER": 12,
-    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4,
-    "MAY": 5, "JUN": 6, "JUL": 7, "AUG": 8,
-    "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
-}
-
-def _detect_block_month(all_values, h_idx):
-    """Cari angka bulan dari baris BULAN: di atas header blok."""
-    for look_back in range(h_idx - 1, max(h_idx - 15, -1), -1):
-        row_text = " ".join(str(c).strip().upper() for c in all_values[look_back])
-        if "BULAN" in row_text:
-            for cell in all_values[look_back]:
-                candidate = str(cell).strip().upper()
-                if candidate in _MONTH_NAME_MAP:
-                    return _MONTH_NAME_MAP[candidate]
-                # partial match (e.g. "JUNE", "MARCH")
-                for key, val in _MONTH_NAME_MAP.items():
-                    if len(key) >= 3 and candidate.startswith(key[:3]):
-                        return val
-            break
-    return None  # bulan tidak diketahui
 
 def parse_unavailability_sheet(gc, spreadsheet_id, sheet_name):
     spreadsheet = gc.open_by_key(spreadsheet_id)
     worksheet   = spreadsheet.worksheet(sheet_name)
-    all_values  = worksheet.get_all_values()
+
+    # -------------------------------------------------------
+    # PENTING: gunakan value_render_option='FORMATTED_VALUE'
+    # agar nilai dropdown (data validation) terbaca sebagai
+    # teks, bukan string kosong.
+    # worksheet.get_all_values() secara default sudah pakai
+    # FORMATTED_VALUE, tapi pada beberapa versi gspread lama
+    # dropdown bisa kosong. Kita eksplisit lewat get():
+    # -------------------------------------------------------
+    all_values = worksheet.get(
+        "A1:ZZ",
+        value_render_option="FORMATTED_VALUE",
+        date_time_render_option="FORMATTED_STRING",
+    )
 
     unavail = {}
 
-    header_row_indices = [
-        i for i, row in enumerate(all_values)
-        if len(row) > 1 and row[1].strip().lower() == "guide"
-    ]
+    # -------------------------------------------------------
+    # Cari baris header: baris yang mengandung kata "guide"
+    # di SALAH SATU selnya (bukan hanya index 1).
+    # Ini mengatasi offset kolom (No. | Guide | tgl1 | tgl2 …)
+    # -------------------------------------------------------
+    header_row_indices = []
+    for i, row in enumerate(all_values):
+        for cell in row:
+            if str(cell).strip().lower() == "guide":
+                header_row_indices.append(i)
+                break   # sudah ketemu di baris ini, lanjut ke baris berikutnya
+
+    if not header_row_indices:
+        # Kembalikan dict kosong daripada crash; bisa di-log
+        return unavail
 
     # Kumpulkan semua indeks header blok untuk tahu batas tiap blok
     next_header = {header_row_indices[i]: header_row_indices[i + 1]
@@ -177,12 +175,22 @@ def parse_unavailability_sheet(gc, spreadsheet_id, sheet_name):
     for h_idx in header_row_indices:
         header_row = all_values[h_idx]
 
-        # FIX: deteksi bulan dari baris "BULAN:" di atas header blok
-        block_month = _detect_block_month(all_values, h_idx)
+        # -------------------------------------------------------
+        # Temukan kolom "Guide" secara dinamis (bukan hardcode [1])
+        # -------------------------------------------------------
+        guide_col_idx = None
+        for ci, cell in enumerate(header_row):
+            if str(cell).strip().lower() == "guide":
+                guide_col_idx = ci
+                break
 
+        if guide_col_idx is None:
+            continue  # seharusnya tidak terjadi, tapi aman
+
+        # Kolom tanggal: semua kolom SETELAH kolom Guide yang isinya angka
         col_to_day = {}
-        for col_idx in range(2, len(header_row)):
-            val = header_row[col_idx].strip()
+        for col_idx in range(guide_col_idx + 1, len(header_row)):
+            val = str(header_row[col_idx]).strip()
             if re.match(r"^\d{1,2}$", val):
                 col_to_day[col_idx] = int(val)
 
@@ -192,17 +200,17 @@ def parse_unavailability_sheet(gc, spreadsheet_id, sheet_name):
         for row_idx in range(h_idx + 1, block_end):
             row = all_values[row_idx]
 
-            # Baris terlalu pendek → skip (bukan break)
-            if len(row) < 2:
+            # Baris terlalu pendek → skip
+            if len(row) <= guide_col_idx:
                 continue
 
-            guide_name = normalize_name(row[1])
+            guide_name = normalize_name(row[guide_col_idx])
 
-            # Baris kosong di kolom B → skip, masih dalam blok yang sama
+            # Baris kosong di kolom Guide → skip
             if not guide_name:
                 continue
 
-            # Ketemu header blok berikutnya → stop
+            # Safety net: header blok berikutnya
             if guide_name.lower() == "guide":
                 break
 
@@ -212,11 +220,10 @@ def parse_unavailability_sheet(gc, spreadsheet_id, sheet_name):
             for col_idx, day_num in col_to_day.items():
                 if col_idx >= len(row):
                     continue
-                cell_val = row[col_idx].strip().upper()
+                cell_val = str(row[col_idx]).strip().upper()
                 if cell_val in SHIFT_MAP:
                     for shift in SHIFT_MAP[cell_val]:
-                        # FIX: simpan (month, day, shift) — bukan (day, shift)
-                        unavail[guide_name].add((block_month, day_num, shift))
+                        unavail[guide_name].add((day_num, shift))
 
     return unavail
 
@@ -332,6 +339,9 @@ def run_assignment():
         }
 
     # ---- Assignment Process ----
+    # Batas maksimum penugasan per guide per minggu (kendala kapasitas b)
+    MAX_ASSIGNMENTS = 5
+
     all_results = []
     weeks = sorted(dashboard["WEEK"].dropna().unique())
 
@@ -341,22 +351,25 @@ def run_assignment():
             "DATE", ascending=True
         ).reset_index(drop=True)
 
+        # Reset assigned_count setiap awal minggu
         for guide in guide_dict:
             guide_dict[guide]["assigned_count"] = 0
 
         assignment_output = []
 
         for _, row in dashboard_week.iterrows():
-            jadwal    = row["TANGGAL & RUTE"]
-            day_num   = int(row["DAY_NUM"])
-            shift     = row["SHIFT"]
-            month_num = row["DATE"].month  # FIX: sertakan bulan
+            jadwal  = row["TANGGAL & RUTE"]
+            # FIX 2: cast ke int agar (3, "SORE") bukan (3.0, "SORE")
+            day_num = int(row["DAY_NUM"])
+            shift   = row["SHIFT"]
 
             feasible = []
             for guide, info in guide_dict.items():
-                # FIX: pakai (month, day, shift) agar tidak lintas bulan
-                is_unavailable = (month_num, day_num, shift) in info["unavailable"]
-                if not is_unavailable:
+                is_unavailable = (day_num, shift) in info["unavailable"]
+                # Kendala kapasitas: guide yang sudah mencapai MAX_ASSIGNMENTS
+                # dalam minggu berjalan tidak diikutsertakan sebagai kandidat
+                has_capacity   = info["assigned_count"] < MAX_ASSIGNMENTS
+                if not is_unavailable and has_capacity:
                     k      = info["assigned_count"]
                     rating = info["rating"]
                     weight = rating / (k + 1)
